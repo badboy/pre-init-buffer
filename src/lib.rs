@@ -46,6 +46,27 @@ pub enum DispatchError {
     RecvError(#[from] mpsc::RecvError),
 }
 
+#[derive(Clone)]
+pub struct DispatchGuard(SyncSender<Command>);
+
+impl DispatchGuard {
+    pub fn launch(
+        &self,
+        task: impl Fn() + Send + 'static,
+    ) -> Result<(), DispatchError> {
+        log::trace!("launching task on the guard");
+        self.0
+            .try_send(Command::Task(Box::new(task)))
+            .map_err(|_| DispatchError::SendError)
+    }
+
+    pub fn shutdown(&self) -> Result<(), DispatchError> {
+        self.0
+            .try_send(Command::Shutdown)
+            .map_err(|_| DispatchError::SendError)
+    }
+}
+
 /// A dispatcher.
 ///
 /// Run expensive processing tasks sequentially off the main thread.
@@ -68,7 +89,7 @@ pub enum DispatchError {
 pub struct Dispatcher {
     preinit_sender: Option<SyncSender<()>>,
     sender: SyncSender<Command>,
-    worker: JoinHandle<()>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl Dispatcher {
@@ -121,38 +142,50 @@ impl Dispatcher {
         Dispatcher {
             preinit_sender: Some(preinit_sender),
             sender,
-            worker,
+            worker: Some(worker),
         }
+    }
+
+    pub fn guard(&self) -> DispatchGuard {
+        DispatchGuard(self.sender.clone())
     }
 
     /// Start processing queued tasks.
     ///
     /// This function blocks until queued tasks prior to this call are finished.
     /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
-    pub fn flush_init(&mut self)  -> Result<(), DispatchError> {
-        if let None = self.preinit_sender.take().map(|tx| tx.send(())) {
-
-        }
+    pub fn flush_init(&mut self) -> Result<(), DispatchError> {
+        if let None = self.preinit_sender.take().map(|tx| tx.send(())) {}
 
         // Block for queue to empty.
         let (tx, rx) = mpsc::channel();
 
         let task = Box::new(move || {
             log::trace!("End of the queue. Unblock main thread.");
-            tx.send(()).unwrap();
+            tx.send(())
+                .expect("Can't send acknowledgement back to main thread");
         });
-        self.sender.send(Command::Task(task)).map_err(|_| DispatchError::SendError)?;
+        self.sender
+            .send(Command::Task(task))
+            .map_err(|_| DispatchError::SendError)?;
         rx.recv()?;
         Ok(())
     }
 
-    /// Shutdown the dispatch queue.
+    /// Send a shutdown request to the worker.
     ///
-    /// This will initiate a shutdown of the worker thread
-    /// and block until all enqueued tasks are finished.
-    pub fn shutdown(self) -> Result<(), DispatchError> {
-        self.sender.try_send(Command::Shutdown).map_err(|_| DispatchError::SendError)?;
-        self.worker.join().map_err(|_| DispatchError::WorkerPanic)?;
+    /// This will initiate a shutdown of the worker thread.
+    /// It will not block on the worker thread.
+    pub fn try_shutdown(&self) -> Result<(), DispatchError> {
+        self.sender
+            .try_send(Command::Shutdown)
+            .map_err(|_| DispatchError::SendError)
+    }
+
+    pub fn join(mut self) -> Result<(), DispatchError> {
+        if let Some(worker) = self.worker.take() {
+            worker.join().map_err(|_| DispatchError::WorkerPanic)?;
+        }
         Ok(())
     }
 
@@ -162,7 +195,19 @@ impl Dispatcher {
     /// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
     ///
     /// This will not block.
-    pub fn launch(&mut self, task: impl Fn() + Send + 'static) -> Result<(), DispatchError> {
-        self.sender.try_send(Command::Task(Box::new(task))).map_err(|_| DispatchError::SendError)
+    pub fn launch(
+        &self,
+        task: impl Fn() + Send + 'static,
+    ) -> Result<(), DispatchError> {
+        self.sender
+            .try_send(Command::Task(Box::new(task)))
+            .map_err(|_| DispatchError::SendError)
+    }
+}
+
+impl Drop for Dispatcher {
+    fn drop(&mut self) {
+        log::trace!("Dropping dispatcher, waiting for worker thread.");
+        self.worker.take().map(|t| t.join().unwrap());
     }
 }
