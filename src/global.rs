@@ -19,7 +19,7 @@ fn guard() -> &'static DispatchGuard {
 ///
 /// The new task will be enqueued immediately.
 /// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
-pub fn launch(task: impl Fn() + Send + 'static) -> Result<(), DispatchError> {
+pub fn launch(task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
     guard().launch(task)
 }
 

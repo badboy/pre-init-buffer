@@ -29,7 +29,7 @@ mod global;
 /// The command a worker should execute.
 enum Command {
     /// A task is a user-defined function to run.
-    Task(Box<dyn Fn() + Send>),
+    Task(Box<dyn FnOnce() + Send>),
     /// Signal the worker to finish work and shut down.
     Shutdown,
 }
@@ -52,7 +52,7 @@ pub struct DispatchGuard(SyncSender<Command>);
 impl DispatchGuard {
     pub fn launch(
         &self,
-        task: impl Fn() + Send + 'static,
+        task: impl FnOnce() + Send + 'static,
     ) -> Result<(), DispatchError> {
         log::trace!("launching task on the guard");
         self.0
@@ -197,7 +197,7 @@ impl Dispatcher {
     /// This will not block.
     pub fn launch(
         &self,
-        task: impl Fn() + Send + 'static,
+        task: impl FnOnce() + Send + 'static,
     ) -> Result<(), DispatchError> {
         self.sender
             .try_send(Command::Task(Box::new(task)))
