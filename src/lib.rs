@@ -20,6 +20,7 @@
 
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
+use thiserror::Error;
 
 pub use global::*;
 
@@ -31,6 +32,18 @@ enum Command {
     Task(Box<dyn Fn() + Send>),
     /// Signal the worker to finish work and shut down.
     Shutdown,
+}
+
+#[derive(Error, Debug)]
+pub enum DispatchError {
+    #[error("The worker panicked while running a task")]
+    WorkerPanic,
+
+    #[error("Failed to send command to worker thread")]
+    SendError,
+
+    #[error("Failed to receive from channel")]
+    RecvError(#[from] mpsc::RecvError),
 }
 
 /// A dispatcher.
@@ -116,8 +129,10 @@ impl Dispatcher {
     ///
     /// This function blocks until queued tasks prior to this call are finished.
     /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
-    pub fn flush_init(&mut self) {
-        self.preinit_sender.take().map(|tx| tx.send(()));
+    pub fn flush_init(&mut self)  -> Result<(), DispatchError> {
+        if let None = self.preinit_sender.take().map(|tx| tx.send(())) {
+
+        }
 
         // Block for queue to empty.
         let (tx, rx) = mpsc::channel();
@@ -126,17 +141,19 @@ impl Dispatcher {
             log::trace!("End of the queue. Unblock main thread.");
             tx.send(()).unwrap();
         });
-        self.sender.send(Command::Task(task)).unwrap();
-        rx.recv().unwrap();
+        self.sender.send(Command::Task(task)).map_err(|_| DispatchError::SendError)?;
+        rx.recv()?;
+        Ok(())
     }
 
     /// Shutdown the dispatch queue.
     ///
     /// This will initiate a shutdown of the worker thread
     /// and block until all enqueued tasks are finished.
-    pub fn shutdown(self) {
-        let _ = self.sender.try_send(Command::Shutdown);
-        self.worker.join().unwrap();
+    pub fn shutdown(self) -> Result<(), DispatchError> {
+        self.sender.try_send(Command::Shutdown).map_err(|_| DispatchError::SendError)?;
+        self.worker.join().map_err(|_| DispatchError::WorkerPanic)?;
+        Ok(())
     }
 
     /// Launch a new task on the dispatch queue.
@@ -145,12 +162,7 @@ impl Dispatcher {
     /// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
     ///
     /// This will not block.
-    pub fn launch(&mut self, task: impl Fn() + Send + 'static) {
-        match self.sender.try_send(Command::Task(Box::new(task))) {
-            Ok(()) => (),
-            Err(e) => {
-                log::error!("Failed to queue new task: {:?}", e);
-            }
-        }
+    pub fn launch(&mut self, task: impl Fn() + Send + 'static) -> Result<(), DispatchError> {
+        self.sender.try_send(Command::Task(Box::new(task))).map_err(|_| DispatchError::SendError)
     }
 }
