@@ -84,7 +84,10 @@ impl DispatchGuard {
 ///
 /// dispatcher.launch(|| {
 ///     println!("A task of the main thread");
-/// })
+/// }).unwrap();
+///
+/// dispatcher.try_shutdown();
+/// dispatcher.join();
 /// ```
 pub struct Dispatcher {
     preinit_sender: Option<SyncSender<()>>,
