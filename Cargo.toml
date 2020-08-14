@@ -1,5 +1,5 @@
 [package]
-name = "pre-init-buffer"
+name = "dispatcher"
 version = "0.1.0"
 authors = ["Jan-Erik Rediger <janerik@fnordig.de>"]
 edition = "2018"
@@ -7,3 +7,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+once_cell = "1.4.0"
+log = "0.4.11"
+env_logger = "0.7.1"
