@@ -174,14 +174,21 @@ impl Dispatcher {
 
     /// Send a shutdown request to the worker.
     ///
-    /// This will initiate a shutdown of the worker thread.
+    /// This will initiate a shutdown of the worker thread
+    /// and no new tasks will be processed after this.
     /// It will not block on the worker thread.
+    ///
+    /// The global queue won't be usable after this.
+    /// Subsequent calls to `launch` will panic.
     pub fn try_shutdown(&self) -> Result<(), DispatchError> {
         self.sender
             .try_send(Command::Shutdown)
             .map_err(|_| DispatchError::SendError)
     }
 
+    /// Waits for the worker thread to finish and finishes the dispatch queue.
+    ///
+    /// You need to call `try_shutdown` to initiate a shutdown of the queue.
     pub fn join(mut self) -> Result<(), DispatchError> {
         if let Some(worker) = self.worker.take() {
             worker.join().map_err(|_| DispatchError::WorkerPanic)?;

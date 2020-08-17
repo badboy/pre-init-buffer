@@ -40,14 +40,15 @@ pub fn flush_init() -> Result<(), DispatchError> {
 /// Shutdown the dispatch queue.
 ///
 /// This will initiate a shutdown of the worker thread
-/// and block until all enqueued tasks are finished.
-///
-/// The global queue won't be usable after this.
-/// Subsequent calls to `launch` will panic.
+/// and no new tasks will be processed after this.
+/// It will not block on the worker thread.
 pub fn try_shutdown() -> Result<(), DispatchError> {
     guard().shutdown()
 }
 
+/// Waits for the worker thread to finish and finishes the dispatch queue.
+///
+/// You need to call `try_shutdown` to initiate a shutdown of the queue.
 pub fn join() -> Result<(), DispatchError> {
     log::trace!("join");
     let res = GLOBAL_DISPATCHER
