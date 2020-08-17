@@ -18,7 +18,7 @@
 //! });
 //! ```
 
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use thiserror::Error;
 
@@ -34,10 +34,13 @@ enum Command {
     Shutdown,
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum DispatchError {
     #[error("The worker panicked while running a task")]
     WorkerPanic,
+
+    #[error("Maximum queue size reached")]
+    QueueFull,
 
     #[error("Failed to send command to worker thread")]
     SendError,
@@ -46,21 +49,28 @@ pub enum DispatchError {
     RecvError(#[from] mpsc::RecvError),
 }
 
+impl From<TrySendError<Command>> for DispatchError {
+    fn from(err: TrySendError<Command>) -> Self {
+        match err {
+            TrySendError::Full(_) => DispatchError::QueueFull,
+            _ => DispatchError::SendError,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DispatchGuard(SyncSender<Command>);
 
 impl DispatchGuard {
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
         log::trace!("Launching task on the guard");
-        self.0
-            .try_send(Command::Task(Box::new(task)))
-            .map_err(|_| DispatchError::SendError)
+        self.0.try_send(Command::Task(Box::new(task)))?;
+        Ok(())
     }
 
     pub fn shutdown(&self) -> Result<(), DispatchError> {
-        self.0
-            .try_send(Command::Shutdown)
-            .map_err(|_| DispatchError::SendError)
+        self.0.try_send(Command::Shutdown)?;
+        Ok(())
     }
 }
 
@@ -182,9 +192,8 @@ impl Dispatcher {
     /// The global queue won't be usable after this.
     /// Subsequent calls to `launch` will panic.
     pub fn try_shutdown(&self) -> Result<(), DispatchError> {
-        self.sender
-            .try_send(Command::Shutdown)
-            .map_err(|_| DispatchError::SendError)
+        self.sender.try_send(Command::Shutdown)?;
+        Ok(())
     }
 
     /// Waits for the worker thread to finish and finishes the dispatch queue.
@@ -204,15 +213,157 @@ impl Dispatcher {
     ///
     /// This will not block.
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
-        self.sender
-            .try_send(Command::Task(Box::new(task)))
-            .map_err(|_| DispatchError::SendError)
+        self.sender.try_send(Command::Task(Box::new(task)))?;
+        Ok(())
     }
 }
 
 impl Drop for Dispatcher {
     fn drop(&mut self) {
-        log::trace!("Dropping dispatcher, waiting for worker thread.");
-        self.worker.take().map(|t| t.join().unwrap());
+        if thread::panicking() {
+            log::trace!("Thread already panicking. Not blocking on worker.");
+        } else {
+            log::trace!("Dropping dispatcher, waiting for worker thread.");
+            self.worker.take().map(|t| t.join().unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn it_works() {
+        let mut dispatcher = Dispatcher::new(5);
+        dispatcher.flush_init().unwrap();
+
+        dispatcher
+            .launch(|| {
+                // intentionally left empty
+            })
+            .unwrap();
+
+        dispatcher.try_shutdown().unwrap();
+        dispatcher.join().unwrap();
+    }
+
+    #[test]
+    fn tasks_are_processed_in_order() {
+        let mut dispatcher = Dispatcher::new(10);
+        dispatcher.flush_init().unwrap();
+
+        let result = Arc::new(Mutex::new(vec![]));
+        for i in 1..=5 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        dispatcher.try_shutdown().unwrap();
+        dispatcher.join().unwrap();
+
+        assert_eq!(&*result.lock().unwrap(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn preinit_tasks_are_processed_after_flush() {
+        let mut dispatcher = Dispatcher::new(10);
+
+        let result = Arc::new(Mutex::new(vec![]));
+        for i in 1..=5 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        result.lock().unwrap().push(0);
+        dispatcher.flush_init().unwrap();
+        for i in 6..=10 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        dispatcher.try_shutdown().unwrap();
+        dispatcher.join().unwrap();
+
+        assert_eq!(
+            &*result.lock().unwrap(),
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+    }
+
+    #[test]
+    fn tasks_after_shutdown_are_not_processed() {
+        let mut dispatcher = Dispatcher::new(10);
+
+        let result = Arc::new(Mutex::new(vec![]));
+
+        dispatcher.flush_init().unwrap();
+
+        dispatcher.try_shutdown().unwrap();
+        {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(0);
+                })
+                .unwrap();
+        }
+
+        dispatcher.join().unwrap();
+
+        assert_eq!(&*result.lock().unwrap(), &[]);
+    }
+
+    #[test]
+    fn preinit_buffer_fills_up() {
+        let mut dispatcher = Dispatcher::new(5);
+
+        let result = Arc::new(Mutex::new(vec![]));
+
+        for i in 1..=5 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        {
+            let result = Arc::clone(&result);
+            let err = dispatcher.launch(move || {
+                result.lock().unwrap().push(10);
+            });
+            assert_eq!(Err(DispatchError::QueueFull), err);
+        }
+
+        dispatcher.flush_init().unwrap();
+
+        {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(20);
+                })
+                .unwrap();
+        }
+
+        dispatcher.try_shutdown().unwrap();
+        dispatcher.join().unwrap();
+
+        assert_eq!(&*result.lock().unwrap(), &[1, 2, 3, 4, 5, 20]);
     }
 }
