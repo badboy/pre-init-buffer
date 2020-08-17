@@ -50,13 +50,10 @@ pub fn try_shutdown() -> Result<(), DispatchError> {
 ///
 /// You need to call `try_shutdown` to initiate a shutdown of the queue.
 pub fn join() -> Result<(), DispatchError> {
-    log::trace!("join");
-    let res = GLOBAL_DISPATCHER
+    GLOBAL_DISPATCHER
         .write()
         .unwrap()
         .take()
         .map(|dispatcher| dispatcher.join())
-        .unwrap();
-    log::trace!("END join");
-    res
+        .unwrap()
 }

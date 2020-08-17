@@ -51,7 +51,7 @@ pub struct DispatchGuard(SyncSender<Command>);
 
 impl DispatchGuard {
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
-        log::trace!("launching task on the guard");
+        log::trace!("Launching task on the guard");
         self.0
             .try_send(Command::Task(Box::new(task)))
             .map_err(|_| DispatchError::SendError)
@@ -104,12 +104,13 @@ impl Dispatcher {
             log::trace!("Worker started in {:?}", thread::current().id());
 
             match preinit_rx.recv() {
-                Ok(()) => log::trace!(
-                    "({:?}) Unblocked. Processing queue.",
-                    thread::current().id()
-                ),
+                Ok(()) => log::trace!("{:?}: Unblocked. Processing queue.", thread::current().id()),
                 Err(e) => {
-                    log::error!("({:?}) Failed to receive: {:?}", thread::current().id(), e);
+                    log::trace!(
+                        "{:?}: Failed to receive preinit task in worker: Error: {:?}",
+                        thread::current().id(),
+                        e
+                    );
                     return;
                 }
             }
@@ -119,17 +120,17 @@ impl Dispatcher {
 
                 match rx.recv() {
                     Ok(Shutdown) => {
-                        log::trace!("({:?}) Received `Shutdown`", thread::current().id());
+                        log::trace!("{:?}: Received `Shutdown`", thread::current().id());
                         break;
                     }
                     Ok(Task(f)) => {
-                        log::trace!("({:?}) Executing task", thread::current().id());
+                        log::trace!("{:?}: Executing task", thread::current().id());
                         (f)();
                     }
 
                     Err(e) => {
-                        log::error!(
-                            "({:?}) Failed to receive task. Error: {:?}",
+                        log::trace!(
+                            "{:?}: Failed to receive task in worker. Error: {:?}",
                             thread::current().id(),
                             e
                         );
