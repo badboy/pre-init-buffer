@@ -50,10 +50,7 @@ pub enum DispatchError {
 pub struct DispatchGuard(SyncSender<Command>);
 
 impl DispatchGuard {
-    pub fn launch(
-        &self,
-        task: impl FnOnce() + Send + 'static,
-    ) -> Result<(), DispatchError> {
+    pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
         log::trace!("launching task on the guard");
         self.0
             .try_send(Command::Task(Box::new(task)))
@@ -198,10 +195,7 @@ impl Dispatcher {
     /// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
     ///
     /// This will not block.
-    pub fn launch(
-        &self,
-        task: impl FnOnce() + Send + 'static,
-    ) -> Result<(), DispatchError> {
+    pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
         self.sender
             .try_send(Command::Task(Box::new(task)))
             .map_err(|_| DispatchError::SendError)

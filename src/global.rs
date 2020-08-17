@@ -1,10 +1,11 @@
+use once_cell::sync::{Lazy, OnceCell};
 use std::sync::RwLock;
-use once_cell::sync::{OnceCell, Lazy};
 
-use super::{Dispatcher, DispatchGuard, DispatchError};
+use super::{DispatchError, DispatchGuard, Dispatcher};
 
 const GLOBAL_DISPATCHER_LIMIT: usize = 100;
-static GLOBAL_DISPATCHER: Lazy<RwLock<Option<Dispatcher>>> = Lazy::new(|| RwLock::new(Some(Dispatcher::new(GLOBAL_DISPATCHER_LIMIT))));
+static GLOBAL_DISPATCHER: Lazy<RwLock<Option<Dispatcher>>> =
+    Lazy::new(|| RwLock::new(Some(Dispatcher::new(GLOBAL_DISPATCHER_LIMIT))));
 
 fn guard() -> &'static DispatchGuard {
     static GLOBAL_GUARD: OnceCell<DispatchGuard> = OnceCell::new();
@@ -28,7 +29,12 @@ pub fn launch(task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError>
 /// This function blocks until queued tasks prior to this call are finished.
 /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
 pub fn flush_init() -> Result<(), DispatchError> {
-    GLOBAL_DISPATCHER.write().unwrap().as_mut().map(|dispatcher| dispatcher.flush_init()).unwrap()
+    GLOBAL_DISPATCHER
+        .write()
+        .unwrap()
+        .as_mut()
+        .map(|dispatcher| dispatcher.flush_init())
+        .unwrap()
 }
 
 /// Shutdown the dispatch queue.
@@ -44,7 +50,12 @@ pub fn try_shutdown() -> Result<(), DispatchError> {
 
 pub fn join() -> Result<(), DispatchError> {
     log::trace!("join");
-    let res = GLOBAL_DISPATCHER.write().unwrap().take().map(|dispatcher| dispatcher.join()).unwrap();
+    let res = GLOBAL_DISPATCHER
+        .write()
+        .unwrap()
+        .take()
+        .map(|dispatcher| dispatcher.join())
+        .unwrap();
     log::trace!("END join");
     res
 }

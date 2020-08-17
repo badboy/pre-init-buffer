@@ -6,7 +6,8 @@ fn main() {
         log::info!("Enqueue {}", i);
         dispatcher::launch(move || {
             log::info!("Executing task {}", i);
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     log::info!("Flushing.");
@@ -14,7 +15,8 @@ fn main() {
 
     dispatcher::launch(move || {
         log::info!("Another task!");
-    }).unwrap();
+    })
+    .unwrap();
 
     log::info!("Done");
 }
