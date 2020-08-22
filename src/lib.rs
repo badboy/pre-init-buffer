@@ -172,9 +172,11 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    /// Create a new dispatcher with a maximum queue size.
+    /// Creates a new dispatcher with a maximum queue size.
     ///
-    /// Launched tasks won't run until `flush_init` is called.
+    /// Launched tasks won't run until [`flush_init`] is called.
+    ///
+    /// [`flush_init`]: #method.flush_init
     pub fn new(max_queue_size: usize) -> Self {
         let (block_sender, block_rx) = bounded(1);
         let (preinit_sender, preinit_rx) = bounded(max_queue_size);
@@ -256,10 +258,12 @@ impl Dispatcher {
         }
     }
 
-    /// Start processing queued tasks.
+    /// Flushes the pre-init buffer.
     ///
-    /// This function blocks until queued tasks prior to this call are finished.
+    /// This function blocks until tasks queued prior to this call are finished.
     /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
+    ///
+    /// Returns an error if called multiple times.
     pub fn flush_init(&mut self) -> Result<(), DispatchError> {
         match self.block_sender.take() {
             Some(tx) => tx.send(())?,
@@ -312,12 +316,15 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// Launch a new task on the dispatch queue.
+    /// Launches a new task on the dispatch queue.
     ///
     /// The new task will be enqueued immediately.
-    /// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
+    /// If the pre-init queue was already flushed,
+    /// the background thread will process tasks in the queue (see [`flush_init`]).
     ///
     /// This will not block.
+    ///
+    /// [`flush_init`]: #method.flush_init
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
         self.guard().launch(task)
     }

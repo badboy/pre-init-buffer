@@ -16,15 +16,20 @@ fn guard() -> &'static DispatchGuard {
     })
 }
 
-/// Launch a new task on the global dispatch queue.
+/// Launches a new task on the global dispatch queue.
 ///
 /// The new task will be enqueued immediately.
-/// If the queue was already flushed, a background thread will process tasks in the queue (See `flush_init`).
+/// If the pre-init queue was already flushed,
+/// the background thread will process tasks in the queue (see [`flush_init`]).
+///
+/// This will not block.
+///
+/// [`flush_init`]: fn.flush_init.html
 pub fn launch(task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
     guard().launch(task)
 }
 
-/// Start processing queued tasks in the global dispatch queue.
+/// Starts processing queued tasks in the global dispatch queue.
 ///
 /// This function blocks until queued tasks prior to this call are finished.
 /// Once the initial queue is empty the dispatcher will wait for new tasks to be launched.
@@ -37,7 +42,7 @@ pub fn flush_init() -> Result<(), DispatchError> {
         .unwrap()
 }
 
-/// Shutdown the dispatch queue.
+/// Shuts down the dispatch queue.
 ///
 /// This will initiate a shutdown of the worker thread
 /// and no new tasks will be processed after this.
