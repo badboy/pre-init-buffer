@@ -207,7 +207,7 @@ impl Dispatcher {
     pub fn flush_init(&mut self) -> Result<(), DispatchError> {
         match self.block_sender.take() {
             Some(tx) => tx.send(())?,
-            None => return Err(DispatchError::AlreadyFlushed)
+            None => return Err(DispatchError::AlreadyFlushed),
         }
 
         // Block for queue to empty.
@@ -280,8 +280,10 @@ impl Drop for Dispatcher {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::sync::{Arc, Mutex};
+    use std::{thread, time::Duration};
+
+    use super::*;
 
     fn init() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -428,5 +430,48 @@ mod test {
         dispatcher.join().unwrap();
 
         assert_eq!(&*result.lock().unwrap(), &[1, 2, 3, 4, 5, 20]);
+    }
+
+    #[test]
+    fn normal_queue_is_unbounded() {
+        init();
+
+        // Note: We can't actually test that it's fully unbounded,
+        // but we can quickly queue more slow tasks than the pre-init buffer holds
+        // and then guarantuee they all run.
+
+        let mut dispatcher = Dispatcher::new(5);
+
+        let result = Arc::new(Mutex::new(vec![]));
+
+        for i in 1..=5 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        dispatcher.flush_init().unwrap();
+
+        // Queue more than 5 tasks,
+        // Each one is slow to process, so we should be faster in queueing
+        // them up than they are processed.
+        for i in 6..=20 {
+            let result = Arc::clone(&result);
+            dispatcher
+                .launch(move || {
+                    thread::sleep(Duration::from_millis(50));
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        dispatcher.try_shutdown().unwrap();
+        dispatcher.join().unwrap();
+
+        let expected = (1..=20).into_iter().collect::<Vec<_>>();
+        assert_eq!(&*result.lock().unwrap(), &expected);
     }
 }
