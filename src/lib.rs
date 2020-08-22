@@ -33,6 +33,9 @@ enum Command {
     /// A task is a user-defined function to run.
     Task(Box<dyn FnOnce() + Send>),
 
+    /// Swap the channel
+    Swap(Sender<()>),
+
     /// Signal the worker to finish work and shut down.
     Shutdown,
 }
@@ -93,7 +96,10 @@ impl DispatchGuard {
     fn send(&self, task: Command) -> Result<(), DispatchError> {
         log::trace!("Sending on preinit channel");
         let task = match self.preinit.try_send(task) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                log::trace!("preinit send succeeded.");
+                return Ok(());
+            }
             Err(TrySendError::Full(_)) => return Err(DispatchError::QueueFull),
             Err(TrySendError::Disconnected(t)) => t,
         };
@@ -140,7 +146,7 @@ impl Dispatcher {
     pub fn new(max_queue_size: usize) -> Self {
         let (block_sender, block_rx) = bounded(1);
         let (preinit_sender, preinit_rx) = bounded(max_queue_size);
-        let (sender, unbounded_rx) = unbounded();
+        let (sender, mut unbounded_rx) = unbounded();
 
         let worker = thread::spawn(move || {
             log::trace!("Worker started in {:?}", thread::current().id());
@@ -158,7 +164,6 @@ impl Dispatcher {
             }
 
             let mut rx = preinit_rx;
-            let mut other_rx = unbounded_rx;
             loop {
                 use Command::*;
 
@@ -171,15 +176,34 @@ impl Dispatcher {
                         log::trace!("{:?}: Executing task", thread::current().id());
                         (f)();
                     }
+                    Ok(Swap(f)) => {
+                        // A swap can only occur exactly once.
 
-                    // Other side was disconnected.
-                    // This can only happen when we swap to the unbounded queue.
-                    Err(_) => {
                         log::trace!(
-                            "{:?}: Received an error. Swapping channels",
+                            "{:?}: Received a request to swap. Swapping channels",
                             thread::current().id()
                         );
-                        mem::swap(&mut rx, &mut other_rx);
+
+                        // Double-swap:
+                        // 1. First put the unbounded receiver in place.
+                        // 2. Then drop the old receiver so that all senders will fail.
+                        mem::swap(&mut rx, &mut unbounded_rx);
+                        let (unused_tx, mut unused_rx) = bounded(0);
+                        mem::swap(&mut unbounded_rx, &mut unused_rx);
+                        drop(unused_tx);
+
+                        // Finally notify the other side
+                        f.send(()).expect("Other side has gone missing");
+                    }
+
+                    // Other side was disconnected.
+                    Err(e) => {
+                        log::trace!(
+                            "{:?}: Failed to receive preinit task in worker: Error: {:?}",
+                            thread::current().id(),
+                            e
+                        );
+                        return;
                     }
                 }
             }
@@ -215,21 +239,21 @@ impl Dispatcher {
 
         // Closing the pre-init channel.
         // Further messages will be queued on the unbounded queue.
-        let (mut sender, _unused_rx) = bounded(0);
+        let (mut sender, unused_rx) = bounded(0);
         mem::swap(&mut self.preinit_sender, &mut sender);
+        // Close other side immediately
+        drop(unused_rx);
+
+        // Send final (blocking) command.
+        sender
+            .send(Command::Swap(tx))
+            .map_err(|_| DispatchError::SendError)?;
 
         // Dropping the sender closes the channel
         // and thus the worker will eventually swap to the unbounded queue.
+        log::trace!("flush_init. Dropping sender should close the channel.");
         drop(sender);
 
-        let task = Box::new(move || {
-            log::trace!("End of the queue. Unblock main thread.");
-            tx.send(())
-                .expect("Can't send acknowledgement back to main thread");
-        });
-        self.sender
-            .send(Command::Task(task))
-            .map_err(|_| DispatchError::SendError)?;
         rx.recv()?;
         Ok(())
     }
