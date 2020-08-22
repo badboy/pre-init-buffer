@@ -45,10 +45,13 @@
 //! });
 //! ```
 
+#![deny(missing_docs)]
+
 use std::mem;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, unbounded, SendError, Sender, TrySendError};
+use displaydoc::Display;
 use thiserror::Error;
 
 pub use global::*;
@@ -67,21 +70,22 @@ enum Command {
     Shutdown,
 }
 
-#[derive(Error, Debug, PartialEq)]
+/// The error returned from operations on the dispatcher
+#[derive(Error, Display, Debug, PartialEq)]
 pub enum DispatchError {
-    #[error("The worker panicked while running a task")]
+    /// The worker panicked while running a task
     WorkerPanic,
 
-    #[error("Maximum queue size reached")]
+    /// Maximum queue size reached
     QueueFull,
 
-    #[error("Pre-init buffer was already flushed")]
+    /// Pre-init buffer was already flushed
     AlreadyFlushed,
 
-    #[error("Failed to send command to worker thread")]
+    /// Failed to send command to worker thread
     SendError,
 
-    #[error("Failed to receive from channel")]
+    /// Failed to receive from channel
     RecvError(#[from] crossbeam_channel::RecvError),
 }
 
@@ -102,8 +106,9 @@ impl<T> From<SendError<T>> for DispatchError {
     }
 }
 
+/// A clonable guard for a dispatch queue.
 #[derive(Clone)]
-pub struct DispatchGuard {
+struct DispatchGuard {
     preinit: Sender<Command>,
     sender: Sender<Command>,
 }
@@ -244,7 +249,7 @@ impl Dispatcher {
         }
     }
 
-    pub fn guard(&self) -> DispatchGuard {
+    fn guard(&self) -> DispatchGuard {
         DispatchGuard {
             preinit: self.preinit_sender.clone(),
             sender: self.sender.clone(),

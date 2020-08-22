@@ -58,10 +58,22 @@ name = "dispatcher"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "displaydoc",
  "env_logger",
  "log",
  "once_cell",
  "thiserror",
+]
+
+[[package]]
+name = "displaydoc"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adc2ab4d5a16117f9029e9a6b5e4e79f4c67f6519bc134210d4d4a04ba31f41b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
