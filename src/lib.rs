@@ -24,9 +24,9 @@ use std::thread::{self, JoinHandle};
 use crossbeam_channel::{bounded, unbounded, SendError, Sender, TrySendError};
 use thiserror::Error;
 
-//pub use global::*;
+pub use global::*;
 
-//mod global;
+mod global;
 
 /// The command a worker should execute.
 enum Command {
