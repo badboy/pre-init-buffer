@@ -1,5 +1,32 @@
 //! A global dispatcher queue.
 //!
+//! # Example - Local Dispatch queue
+//!
+//! ```rust
+//! # use dispatcher::Dispatcher;
+//! let mut dispatcher = Dispatcher::new(10);
+//!
+//! dispatcher.launch(|| {
+//!     println!("An early task to be queued up");
+//! });
+//!
+//! // Ensure the dispatcher queue is being worked on.
+//! dispatcher.flush_init();
+//!
+//! dispatcher.launch(|| {
+//!     println!("Executing expensive task");
+//!     // Run your expensive task in a separate thread.
+//! });
+//!
+//! dispatcher.launch(|| {
+//!     println!("A second task that's executed sequentially, but off the main thread.");
+//! });
+//!
+//! // Finally stop the dispatcher
+//! dispatcher.try_shutdown().unwrap();
+//! # dispatcher.join().unwrap();
+//! ```
+//!
 //! # Example - Global Dispatch queue
 //!
 //! The global dispatch queue is pre-configured with a maximum queue size of 100 tasks.
