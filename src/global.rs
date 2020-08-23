@@ -62,3 +62,51 @@ pub fn join() -> Result<(), DispatchError> {
         .map(|dispatcher| dispatcher.join())
         .unwrap()
 }
+
+#[cfg(test)]
+mod test {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    // We can only test this once, as it is a global resource which we can't reset.
+    #[test]
+    fn global_fills_up_in_order_and_works() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let result = Arc::new(Mutex::new(vec![]));
+
+        for i in 1..=100 {
+            let result = Arc::clone(&result);
+                launch(move || {
+                    result.lock().unwrap().push(i);
+                })
+                .unwrap();
+        }
+
+        {
+            let result = Arc::clone(&result);
+            let err = launch(move || {
+                result.lock().unwrap().push(150);
+            });
+            assert_eq!(Err(DispatchError::QueueFull), err);
+        }
+
+        flush_init().unwrap();
+
+        {
+            let result = Arc::clone(&result);
+                launch(move || {
+                    result.lock().unwrap().push(200);
+                })
+                .unwrap();
+        }
+
+        try_shutdown().unwrap();
+        join().unwrap();
+
+        let mut expected = (1..=100).collect::<Vec<_>>();
+        expected.push(200);
+        assert_eq!(&*result.lock().unwrap(), &expected);
+    }
+}
