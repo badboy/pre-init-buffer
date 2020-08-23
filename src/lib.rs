@@ -99,10 +99,8 @@ impl From<TrySendError<Command>> for DispatchError {
 }
 
 impl<T> From<SendError<T>> for DispatchError {
-    fn from(err: SendError<T>) -> Self {
-        match err {
-            _ => DispatchError::SendError,
-        }
+    fn from(_: SendError<T>) -> Self {
+        DispatchError::SendError
     }
 }
 
@@ -336,7 +334,9 @@ impl Drop for Dispatcher {
             log::trace!("Thread already panicking. Not blocking on worker.");
         } else {
             log::trace!("Dropping dispatcher, waiting for worker thread.");
-            self.worker.take().map(|t| t.join().unwrap());
+            if let Some(t) = self.worker.take() {
+                t.join().unwrap()
+            }
         }
     }
 }
@@ -534,7 +534,7 @@ mod test {
         dispatcher.try_shutdown().unwrap();
         dispatcher.join().unwrap();
 
-        let expected = (1..=20).into_iter().collect::<Vec<_>>();
+        let expected = (1..=20).collect::<Vec<_>>();
         assert_eq!(&*result.lock().unwrap(), &expected);
     }
 }
