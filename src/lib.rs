@@ -176,14 +176,14 @@ impl Dispatcher {
     ///
     /// [`flush_init`]: #method.flush_init
     pub fn new(max_queue_size: usize) -> Self {
-        let (block_sender, block_rx) = bounded(1);
-        let (preinit_sender, preinit_rx) = bounded(max_queue_size);
-        let (sender, mut unbounded_rx) = unbounded();
+        let (block_sender, block_receiver) = bounded(1);
+        let (preinit_sender, preinit_receiver) = bounded(max_queue_size);
+        let (sender, mut unbounded_receiver) = unbounded();
 
         let worker = thread::spawn(move || {
             log::trace!("Worker started in {:?}", thread::current().id());
 
-            match block_rx.recv() {
+            match block_receiver.recv() {
                 Ok(()) => log::trace!("{:?}: Unblocked. Processing queue.", thread::current().id()),
                 Err(e) => {
                     log::trace!(
@@ -195,11 +195,11 @@ impl Dispatcher {
                 }
             }
 
-            let mut rx = preinit_rx;
+            let mut receiver = preinit_receiver;
             loop {
                 use Command::*;
 
-                match rx.recv() {
+                match receiver.recv() {
                     Ok(Shutdown) => {
                         log::trace!("{:?}: Received `Shutdown`", thread::current().id());
                         break;
@@ -208,24 +208,36 @@ impl Dispatcher {
                         log::trace!("{:?}: Executing task", thread::current().id());
                         (f)();
                     }
-                    Ok(Swap(f)) => {
-                        // A swap can only occur exactly once.
 
-                        log::trace!(
-                            "{:?}: Received a request to swap. Swapping channels",
-                            thread::current().id()
-                        );
+                    Ok(Swap(f)) => {
+                        // A swap should only occur exactly once.
+                        // This is upheld by `flush_init`, which errors out if the preinit buffer
+                        // was already flushed.
+
+                        // Need a default value to put into place.
+                        // An empty queue doesn't allocate.
+                        let (unused_sender, mut unused_receiver) = bounded(0);
+                        // Close sender immediately,
+                        // that will make the receiver error out on all operations.
+                        drop(unused_sender);
 
                         // Double-swap:
                         // 1. First put the unbounded receiver in place.
-                        // 2. Then drop the old receiver so that all senders will fail.
-                        mem::swap(&mut rx, &mut unbounded_rx);
-                        let (unused_tx, mut unused_rx) = bounded(0);
-                        mem::swap(&mut unbounded_rx, &mut unused_rx);
-                        drop(unused_tx);
+                        //    This is used in the worker thread loop.
+                        mem::swap(&mut receiver, &mut unbounded_receiver);
+                        // 2. `unbounded_receiver` contains the preinit receiver now.
+                        //    We need to drop it so that other clones of the sender side
+                        //    disconnect.
+                        //    In order to be able to drop it we need to take it out of its current
+                        //    place, otherwise Rust will stop us from moving that value (because
+                        //    it's used in other places).
+                        mem::swap(&mut unbounded_receiver, &mut unused_receiver);
+                        // `unused_receiver` now contains the preinit receiver, so we can drop it.
+                        drop(unused_receiver);
 
                         // Finally notify the other side
-                        f.send(()).expect("Other side has gone missing");
+                        f.send(())
+                            .expect("The caller of `flush_init` has gone missing");
                     }
 
                     // Other side was disconnected.
@@ -263,32 +275,39 @@ impl Dispatcher {
     ///
     /// Returns an error if called multiple times.
     pub fn flush_init(&mut self) -> Result<(), DispatchError> {
+        // Unblock the worker thread exactly once.
         match self.block_sender.take() {
             Some(tx) => tx.send(())?,
             None => return Err(DispatchError::AlreadyFlushed),
         }
 
-        // Block for queue to empty.
-        let (tx, rx) = bounded(1);
+        // Single-use channel to communicate with the worker thread.
+        let (swap_sender, swap_receiver) = bounded(1);
 
         // Closing the pre-init channel.
         // Further messages will be queued on the unbounded queue.
-        let (mut sender, unused_rx) = bounded(0);
-        mem::swap(&mut self.preinit_sender, &mut sender);
-        // Close other side immediately
-        drop(unused_rx);
+        // An empty queue doesn't allocate.
+        let (mut sender, unused_receiver) = bounded(0);
+        // Close other side immediately,
+        // that will make the sender error out on all operations.
+        drop(unused_receiver);
 
-        // Send final (blocking) command.
+        // Now put the (disconnected) sender in place.
+        // Any new task launches will go the usual queue.
+        mem::swap(&mut self.preinit_sender, &mut sender);
+
+        // Send final command and block until it is sent.
         sender
-            .send(Command::Swap(tx))
+            .send(Command::Swap(swap_sender))
             .map_err(|_| DispatchError::SendError)?;
 
         // Dropping the sender closes the channel
         // and thus the worker will eventually swap to the unbounded queue.
-        log::trace!("flush_init. Dropping sender should close the channel.");
         drop(sender);
 
-        rx.recv()?;
+        // Now wait for the worker thread to do the swap and inform us.
+        // This blocks until all tasks in the preinit buffer have been processed.
+        swap_receiver.recv()?;
         Ok(())
     }
 
