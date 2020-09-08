@@ -45,9 +45,11 @@
 //! });
 //! ```
 
-#![deny(missing_docs)]
-
 use std::mem;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, unbounded, SendError, Sender, TrySendError};
@@ -106,9 +108,10 @@ impl<T> From<SendError<T>> for DispatchError {
 
 /// A clonable guard for a dispatch queue.
 #[derive(Clone)]
-struct DispatchGuard {
+pub struct DispatchGuard {
+    queue_preinit: Arc<AtomicBool>,
     preinit: Sender<Command>,
-    sender: Sender<Command>,
+    queue: Sender<Command>,
 }
 
 impl DispatchGuard {
@@ -125,18 +128,20 @@ impl DispatchGuard {
 
     fn send(&self, task: Command) -> Result<(), DispatchError> {
         log::trace!("Sending on preinit channel");
-        let task = match self.preinit.try_send(task) {
-            Ok(()) => {
-                log::trace!("preinit send succeeded.");
-                return Ok(());
+        if self.queue_preinit.load(Ordering::SeqCst) {
+            match self.preinit.try_send(task) {
+                Ok(()) => {
+                    log::trace!("preinit send succeeded.");
+                    Ok(())
+                }
+                Err(TrySendError::Full(_)) => Err(DispatchError::QueueFull),
+                Err(TrySendError::Disconnected(_)) => Err(DispatchError::SendError),
             }
-            Err(TrySendError::Full(_)) => return Err(DispatchError::QueueFull),
-            Err(TrySendError::Disconnected(t)) => t,
-        };
-
-        log::trace!("Sending on unbounded channel");
-        self.sender.send(task)?;
-        Ok(())
+        } else {
+            log::trace!("Sending on unbounded channel");
+            self.queue.send(task)?;
+            Ok(())
+        }
     }
 }
 
@@ -163,9 +168,19 @@ impl DispatchGuard {
 /// dispatcher.join().unwrap();
 /// ```
 pub struct Dispatcher {
-    block_sender: Option<Sender<()>>,
+    /// Whether to queue on the preinit buffer or on the unbounded queue
+    queue_preinit: Arc<AtomicBool>,
+
+    /// Allows to unblock the worker thread initially.
+    block_sender: Sender<()>,
+
+    /// Sender for the preinit queue.
     preinit_sender: Sender<Command>,
+
+    /// Sender for the unbounded queue.
     sender: Sender<Command>,
+
+    /// Handle to the worker thread, allows to wait for it to finish.
     worker: Option<JoinHandle<()>>,
 }
 
@@ -179,6 +194,8 @@ impl Dispatcher {
         let (block_sender, block_receiver) = bounded(1);
         let (preinit_sender, preinit_receiver) = bounded(max_queue_size);
         let (sender, mut unbounded_receiver) = unbounded();
+
+        let queue_preinit = Arc::new(AtomicBool::new(true));
 
         let worker = thread::spawn(move || {
             log::trace!("Worker started in {:?}", thread::current().id());
@@ -214,28 +231,13 @@ impl Dispatcher {
                         // This is upheld by `flush_init`, which errors out if the preinit buffer
                         // was already flushed.
 
-                        // Need a default value to put into place.
-                        // An empty queue doesn't allocate.
-                        let (unused_sender, mut unused_receiver) = bounded(0);
-                        // Close sender immediately,
-                        // that will make the receiver error out on all operations.
-                        drop(unused_sender);
-
-                        // Double-swap:
-                        // 1. First put the unbounded receiver in place.
-                        //    This is used in the worker thread loop.
+                        // We swap the channels we listen on for new tasks.
+                        // The next iteration will continue with the unbounded queue.
                         mem::swap(&mut receiver, &mut unbounded_receiver);
-                        // 2. `unbounded_receiver` contains the preinit receiver now.
-                        //    We need to drop it so that other clones of the sender side
-                        //    disconnect.
-                        //    In order to be able to drop it we need to take it out of its current
-                        //    place, otherwise Rust will stop us from moving that value (because
-                        //    it's used in other places).
-                        mem::swap(&mut unbounded_receiver, &mut unused_receiver);
-                        // `unused_receiver` now contains the preinit receiver, so we can drop it.
-                        drop(unused_receiver);
 
-                        // Finally notify the other side
+                        // The swap command MUST be the last one received on the preinit buffer,
+                        // so by the time we run this we know all preinit tasks were processed.
+                        // We can notify the other side.
                         f.send(())
                             .expect("The caller of `flush_init` has gone missing");
                     }
@@ -254,17 +256,19 @@ impl Dispatcher {
         });
 
         Dispatcher {
-            block_sender: Some(block_sender),
+            queue_preinit,
+            block_sender,
             preinit_sender,
             sender,
             worker: Some(worker),
         }
     }
 
-    fn guard(&self) -> DispatchGuard {
+    pub fn guard(&self) -> DispatchGuard {
         DispatchGuard {
+            queue_preinit: Arc::clone(&self.queue_preinit),
             preinit: self.preinit_sender.clone(),
-            sender: self.sender.clone(),
+            queue: self.sender.clone(),
         }
     }
 
@@ -275,35 +279,22 @@ impl Dispatcher {
     ///
     /// Returns an error if called multiple times.
     pub fn flush_init(&mut self) -> Result<(), DispatchError> {
-        // Unblock the worker thread exactly once.
-        match self.block_sender.take() {
-            Some(tx) => tx.send(())?,
-            None => return Err(DispatchError::AlreadyFlushed),
+        // We immediately stop queueing in the pre-init buffer.
+        let old_val = self.queue_preinit.swap(false, Ordering::SeqCst);
+        if !old_val {
+            return Err(DispatchError::AlreadyFlushed);
         }
+
+        // Unblock the worker thread exactly once.
+        self.block_sender.send(())?;
 
         // Single-use channel to communicate with the worker thread.
         let (swap_sender, swap_receiver) = bounded(1);
 
-        // Closing the pre-init channel.
-        // Further messages will be queued on the unbounded queue.
-        // An empty queue doesn't allocate.
-        let (mut sender, unused_receiver) = bounded(0);
-        // Close other side immediately,
-        // that will make the sender error out on all operations.
-        drop(unused_receiver);
-
-        // Now put the (disconnected) sender in place.
-        // Any new task launches will go the usual queue.
-        mem::swap(&mut self.preinit_sender, &mut sender);
-
         // Send final command and block until it is sent.
-        sender
+        self.preinit_sender
             .send(Command::Swap(swap_sender))
             .map_err(|_| DispatchError::SendError)?;
-
-        // Dropping the sender closes the channel
-        // and thus the worker will eventually swap to the unbounded queue.
-        drop(sender);
 
         // Now wait for the worker thread to do the swap and inform us.
         // This blocks until all tasks in the preinit buffer have been processed.
@@ -320,7 +311,7 @@ impl Dispatcher {
     /// The global queue won't be usable after this.
     /// Subsequent calls to `launch` will panic.
     pub fn try_shutdown(&self) -> Result<(), DispatchError> {
-        self.guard().shutdown()
+        self.send(Command::Shutdown)
     }
 
     /// Waits for the worker thread to finish and finishes the dispatch queue.
@@ -343,7 +334,25 @@ impl Dispatcher {
     ///
     /// [`flush_init`]: #method.flush_init
     pub fn launch(&self, task: impl FnOnce() + Send + 'static) -> Result<(), DispatchError> {
-        self.guard().launch(task)
+        let task = Command::Task(Box::new(task));
+        self.send(task)
+    }
+
+    fn send(&self, task: Command) -> Result<(), DispatchError> {
+        if self.queue_preinit.load(Ordering::SeqCst) {
+            match self.preinit_sender.try_send(task) {
+                Ok(()) => {
+                    log::trace!("preinit send succeeded.");
+                    Ok(())
+                }
+                Err(TrySendError::Full(_)) => Err(DispatchError::QueueFull),
+                Err(TrySendError::Disconnected(_)) => Err(DispatchError::SendError),
+            }
+        } else {
+            log::trace!("Sending on unbounded channel");
+            self.sender.send(task)?;
+            Ok(())
+        }
     }
 }
 
